@@ -2026,6 +2026,8 @@ class _NotificationsTabState extends State<NotificationsTab> {
   final _messageCtrl = TextEditingController();
   bool _sending = false;
   bool _monthlySending = false;
+  bool _seasonNoticeSending = false;
+  bool _seasonResetSending = false;
 
   @override
   void dispose() {
@@ -2102,6 +2104,79 @@ class _NotificationsTabState extends State<NotificationsTab> {
     }
   }
 
+  Future<void> _sendSeasonEndedNotice() async {
+    setState(() => _seasonNoticeSending = true);
+    try {
+      final res = await widget.api.post('/admin/notifications/season-ended');
+      if (!mounted) return;
+      if (res.error != null) throw res.error!;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تم إرسال إشعار نهاية السيزن')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('فشل إرسال إشعار السيزن: $e')));
+    } finally {
+      if (mounted) setState(() => _seasonNoticeSending = false);
+    }
+  }
+
+  Future<void> _resetSeasonAndNotify() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('تصفير السيزن الشهري؟'),
+        content: const Text(
+          'بيرجع كل اللاعبين إلى ٥ لآلئ، ويترك الانواط محفوظة، ويرسل إشعار نهاية السيزن.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('تأكيد'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() => _seasonResetSending = true);
+    try {
+      final res = await widget.api.post(
+        '/admin/notifications/season-reset',
+        body: {'sendPush': true},
+      );
+      if (!mounted) return;
+      if (res.error != null) throw res.error!;
+      final data = res.data;
+      final skipped = data is Map ? data['skipped'] == true : false;
+      final users = data is Map ? (data['usersUpdated'] ?? 0) : 0;
+      final push = data is Map ? data['push'] : null;
+      final pushSent = push is Map ? push['sent'] == true : false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            skipped
+                ? 'السيزن متصفر مسبقًا لهذا الشهر'
+                : 'تم تصفير $users مستخدم وإرسال الإشعار: ${pushSent ? 'نعم' : 'لا'}',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('فشل تصفير السيزن: $e')));
+    } finally {
+      if (mounted) setState(() => _seasonResetSending = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final compact = MediaQuery.sizeOf(context).width < 560;
@@ -2151,6 +2226,73 @@ class _NotificationsTabState extends State<NotificationsTab> {
                 : const Icon(Icons.send_rounded),
             label: Text(
               _sending ? 'جاري الإرسال...' : 'إرسال الإشعار للجميع',
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ),
+        const SizedBox(height: 24),
+        const Divider(),
+        const SizedBox(height: 16),
+        Text(
+          'نهاية السيزن الشهري',
+          style: TextStyle(
+            fontSize: compact ? 20 : 22,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'يرجع كل اللاعبين إلى ٥ لآلئ، ويبدأ ترتيب الشهر من جديد، وتظل الانواط محفوظة.',
+          style: _mutedTextStyle(context),
+        ),
+        const SizedBox(height: 16),
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            onPressed:
+                (_sending ||
+                    _monthlySending ||
+                    _seasonNoticeSending ||
+                    _seasonResetSending)
+                ? null
+                : _sendSeasonEndedNotice,
+            icon: _seasonNoticeSending
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.campaign_rounded),
+            label: Text(
+              _seasonNoticeSending
+                  ? 'جاري إرسال إشعار السيزن...'
+                  : 'إرسال إشعار نهاية السيزن فقط',
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            onPressed:
+                (_sending ||
+                    _monthlySending ||
+                    _seasonNoticeSending ||
+                    _seasonResetSending)
+                ? null
+                : _resetSeasonAndNotify,
+            icon: _seasonResetSending
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.restart_alt_rounded),
+            label: Text(
+              _seasonResetSending
+                  ? 'جاري تصفير السيزن...'
+                  : 'تصفير السيزن وإرسال الإشعار',
               overflow: TextOverflow.ellipsis,
             ),
           ),
