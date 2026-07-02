@@ -2028,12 +2028,64 @@ class _NotificationsTabState extends State<NotificationsTab> {
   bool _monthlySending = false;
   bool _seasonNoticeSending = false;
   bool _seasonResetSending = false;
+  bool _statusChecking = false;
 
   @override
   void dispose() {
     _titleCtrl.dispose();
     _messageCtrl.dispose();
     super.dispose();
+  }
+
+  String _pushDeliveryMessage(
+    dynamic data, {
+    String fallback = 'تم إرسال الإشعار',
+  }) {
+    if (data is! Map) return fallback;
+    final id = (data['id'] ?? '').toString();
+    final recipients = data['recipients'];
+    final errors = data['errors'];
+    final error = data['error'];
+
+    if (id.isNotEmpty) {
+      if (recipients != null) {
+        return 'تم قبول الإشعار من OneSignal، المستلمين: $recipients';
+      }
+      return 'تم قبول الإشعار من OneSignal';
+    }
+    if (errors is List && errors.isNotEmpty) {
+      return 'OneSignal رجّع خطأ: ${errors.first}';
+    }
+    if (error != null && error.toString().isNotEmpty) {
+      return 'OneSignal رجّع خطأ: $error';
+    }
+    return fallback;
+  }
+
+  Future<void> _checkOneSignalStatus() async {
+    setState(() => _statusChecking = true);
+    try {
+      final res = await widget.api.get('/admin/notifications/status');
+      if (!mounted) return;
+      if (res.error != null) throw res.error!;
+      final data = res.data;
+      final appIdOk = data is Map && data['appIdConfigured'] == true;
+      final keyOk = data is Map && data['restApiKeyConfigured'] == true;
+      final maskedAppId = data is Map ? data['appId'] : null;
+      final message = appIdOk && keyOk
+          ? 'OneSignal مضبوط على الـ API: $maskedAppId'
+          : 'ناقص إعدادات OneSignal على الـ API: App ID ${appIdOk ? 'موجود' : 'ناقص'}، REST Key ${keyOk ? 'موجود' : 'ناقص'}';
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('فشل فحص OneSignal: $e')));
+    } finally {
+      if (mounted) setState(() => _statusChecking = false);
+    }
   }
 
   Future<void> _send() async {
@@ -2060,11 +2112,9 @@ class _NotificationsTabState extends State<NotificationsTab> {
       );
       if (!mounted) return;
       if (res.error != null) throw res.error!;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text((res.data['message'] ?? 'تم إرسال الإشعار').toString()),
-        ),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_pushDeliveryMessage(res.data))));
       _titleCtrl.clear();
       _messageCtrl.clear();
     } catch (e) {
@@ -2111,7 +2161,14 @@ class _NotificationsTabState extends State<NotificationsTab> {
       if (!mounted) return;
       if (res.error != null) throw res.error!;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('تم إرسال إشعار نهاية السيزن')),
+        SnackBar(
+          content: Text(
+            _pushDeliveryMessage(
+              res.data,
+              fallback: 'تم إرسال إشعار نهاية السيزن',
+            ),
+          ),
+        ),
       );
     } catch (e) {
       if (!mounted) return;
@@ -2158,12 +2215,15 @@ class _NotificationsTabState extends State<NotificationsTab> {
       final users = data is Map ? (data['usersUpdated'] ?? 0) : 0;
       final push = data is Map ? data['push'] : null;
       final pushSent = push is Map ? push['sent'] == true : false;
+      final pushResponse = push is Map ? push['response'] : null;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
             skipped
                 ? 'السيزن متصفر مسبقًا لهذا الشهر'
-                : 'تم تصفير $users مستخدم وإرسال الإشعار: ${pushSent ? 'نعم' : 'لا'}',
+                : pushSent
+                ? 'تم تصفير $users مستخدم. ${_pushDeliveryMessage(pushResponse)}'
+                : 'تم تصفير $users مستخدم، لكن الإشعار ما انرسل',
           ),
         ),
       );
@@ -2200,6 +2260,31 @@ class _NotificationsTabState extends State<NotificationsTab> {
         Text(
           'أرسل إشعارًا لجميع مستخدمي التطبيق.',
           style: _mutedTextStyle(context),
+        ),
+        const SizedBox(height: 12),
+        Align(
+          alignment: AlignmentDirectional.centerStart,
+          child: OutlinedButton.icon(
+            onPressed:
+                (_statusChecking ||
+                    _sending ||
+                    _monthlySending ||
+                    _seasonNoticeSending ||
+                    _seasonResetSending)
+                ? null
+                : _checkOneSignalStatus,
+            icon: _statusChecking
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.health_and_safety_rounded),
+            label: Text(
+              _statusChecking ? 'جاري فحص OneSignal...' : 'فحص OneSignal',
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
         ),
         const SizedBox(height: 24),
         TextField(
