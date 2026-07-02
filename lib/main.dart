@@ -2043,7 +2043,7 @@ class _NotificationsTabState extends State<NotificationsTab> {
   }) {
     if (data is! Map) return fallback;
     final id = (data['id'] ?? '').toString();
-    final recipients = data['recipients'];
+    final recipients = data['recipients'] ?? data['directRecipients'];
     final errors = data['errors'];
     final error = data['error'];
 
