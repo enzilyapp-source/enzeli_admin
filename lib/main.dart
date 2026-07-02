@@ -2072,9 +2072,22 @@ class _NotificationsTabState extends State<NotificationsTab> {
       final appIdOk = data is Map && data['appIdConfigured'] == true;
       final keyOk = data is Map && data['restApiKeyConfigured'] == true;
       final maskedAppId = data is Map ? data['appId'] : null;
-      final message = appIdOk && keyOk
-          ? 'OneSignal مضبوط على الـ API: $maskedAppId'
-          : 'ناقص إعدادات OneSignal على الـ API: App ID ${appIdOk ? 'موجود' : 'ناقص'}، REST Key ${keyOk ? 'موجود' : 'ناقص'}';
+      final audience = data is Map ? data['audience'] : null;
+      String message;
+      if (!appIdOk || !keyOk) {
+        message =
+            'ناقص إعدادات OneSignal على الـ API: App ID ${appIdOk ? 'موجود' : 'ناقص'}، REST Key ${keyOk ? 'موجود' : 'ناقص'}';
+      } else if (audience is Map && audience['ok'] == true) {
+        final subscribed = audience['subscribedSample'] ?? 0;
+        final total = audience['totalCount'] ?? 0;
+        message =
+            'OneSignal مضبوط: $maskedAppId، المشتركين اللي يشوفهم الـ API: $subscribed من أصل $total';
+      } else if (audience is Map && audience['error'] != null) {
+        message =
+            'المفاتيح موجودة، لكن فشل فحص المشتركين: ${audience['error']}';
+      } else {
+        message = 'OneSignal مضبوط على الـ API: $maskedAppId';
+      }
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(message)));
