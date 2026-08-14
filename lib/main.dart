@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flex_color_picker/flex_color_picker.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'admin_location.dart';
 
 // Base URL for the existing backend (Nest + Prisma). Override via:
 // flutter run -d chrome --dart-define=API_BASE_URL=https://api.example.com
@@ -406,6 +407,63 @@ TextStyle _mutedTextStyle(BuildContext context) {
   );
 }
 
+String _formatCoord(dynamic value) {
+  final n = value is num ? value.toDouble() : double.tryParse('$value');
+  if (n == null) return '-';
+  return n.toStringAsFixed(5);
+}
+
+Widget _locationLockStatus(Map<String, dynamic> item) {
+  final locked = item['locationLock'] == true;
+  if (!locked) {
+    return const Text(
+      'الموقع: مفتوح',
+      style: TextStyle(fontSize: 12, color: Colors.grey),
+    );
+  }
+  final radius = (item['radiusMeters'] as num?)?.toInt() ?? 100;
+  return SelectableText(
+    'الموقع: مقفل • ${_formatCoord(item['anchorLat'])}, ${_formatCoord(item['anchorLng'])} • $radiusم',
+    style: const TextStyle(fontSize: 12, color: Colors.teal),
+  );
+}
+
+Widget _monthlyLeadersBlock(dynamic value) {
+  final leaders = value is List ? value : const [];
+  if (leaders.isEmpty) {
+    return const Text(
+      'متصدر الشهر: لا توجد ألعاب مربوطة بعد',
+      style: TextStyle(fontSize: 12, color: Colors.grey),
+    );
+  }
+  return Wrap(
+    spacing: 6,
+    runSpacing: 6,
+    children: leaders.map<Widget>((raw) {
+      final item = raw is Map<String, dynamic>
+          ? raw
+          : Map<String, dynamic>.from(raw as Map);
+      final gameId = (item['gameId'] ?? '-').toString();
+      final leaderRaw = item['leader'];
+      final leader = leaderRaw is Map
+          ? Map<String, dynamic>.from(leaderRaw)
+          : null;
+      final name = (leader?['displayName'] ?? item['leaderName'] ?? '')
+          .toString();
+      final pearls = leader?['pearls'] ?? item['pearls'];
+      final wins = leader?['wins'] ?? item['wins'];
+      final played = leader?['playedCount'] ?? item['playedCount'];
+      final label = name.trim().isEmpty
+          ? '$gameId: لا يوجد لعب'
+          : '$gameId: $name • ${pearls ?? 0} لؤلؤة • ${wins ?? 0} فوز • ${played ?? 0} لعب';
+      return Chip(
+        avatar: const Icon(Icons.emoji_events_outlined, size: 18),
+        label: Text(label),
+      );
+    }).toList(),
+  );
+}
+
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
 
@@ -637,6 +695,7 @@ class _SponsorTabState extends State<SponsorTab> {
   Future<ApiResponse>? _future;
   final _codeCtrl = TextEditingController();
   final _nameCtrl = TextEditingController();
+  final _imageUrlCtrl = TextEditingController();
   final _gameIdCtrl = TextEditingController();
   final _prizeCtrl = TextEditingController();
   final _themePrimCtrl = TextEditingController();
@@ -644,18 +703,24 @@ class _SponsorTabState extends State<SponsorTab> {
   final _existingSponsorCtrl = TextEditingController();
   final _existingGameCtrl = TextEditingController();
   final _existingPrizeCtrl = TextEditingController();
+  final _latCtrl = TextEditingController();
+  final _lngCtrl = TextEditingController();
+  final _radiusCtrl = TextEditingController(text: '100');
   String? _message;
+  bool _lockEnabled = false;
+  bool _locating = false;
 
   @override
   void initState() {
     super.initState();
-    _future = widget.api.get('/sponsors');
+    _future = widget.api.get('/admin/sponsors');
   }
 
   @override
   void dispose() {
     _codeCtrl.dispose();
     _nameCtrl.dispose();
+    _imageUrlCtrl.dispose();
     _gameIdCtrl.dispose();
     _prizeCtrl.dispose();
     _themePrimCtrl.dispose();
@@ -663,6 +728,9 @@ class _SponsorTabState extends State<SponsorTab> {
     _existingSponsorCtrl.dispose();
     _existingGameCtrl.dispose();
     _existingPrizeCtrl.dispose();
+    _latCtrl.dispose();
+    _lngCtrl.dispose();
+    _radiusCtrl.dispose();
     super.dispose();
   }
 
@@ -675,10 +743,20 @@ class _SponsorTabState extends State<SponsorTab> {
   Future<void> _createSponsor() async {
     final code = _codeCtrl.text.trim();
     final name = _nameCtrl.text.trim();
+    final imageUrl = _imageUrlCtrl.text.trim();
     final themePrimary = _themePrimCtrl.text.trim();
     final themeAccent = _themeAccCtrl.text.trim();
+    final lat = double.tryParse(_latCtrl.text.trim());
+    final lng = double.tryParse(_lngCtrl.text.trim());
+    final radius = int.tryParse(_radiusCtrl.text.trim());
     if (code.isEmpty || name.isEmpty) {
       setState(() => _message = 'أدخل الكود والاسم');
+      return;
+    }
+    if (_lockEnabled && (lat == null || lng == null)) {
+      setState(
+        () => _message = 'فعّل الموقع بعد ما تعبّي Latitude و Longitude',
+      );
       return;
     }
     final res = await widget.api.post(
@@ -686,16 +764,39 @@ class _SponsorTabState extends State<SponsorTab> {
       body: {
         'code': code,
         'name': name,
+        if (imageUrl.isNotEmpty) 'imageUrl': imageUrl,
         if (themePrimary.isNotEmpty) 'themePrimary': themePrimary,
         if (themeAccent.isNotEmpty) 'themeAccent': themeAccent,
+        'locationLock': _lockEnabled,
+        if (_lockEnabled && lat != null) 'lockLat': lat,
+        if (_lockEnabled && lng != null) 'lockLng': lng,
+        if (_lockEnabled && radius != null) 'lockRadius': radius,
       },
     );
-    setState(
-      () => _message =
-          res.error ??
-          'تم طلب إنشاء الراعي (تأكد أن الباكند يدعم endpoint /admin/sponsors)',
-    );
+    setState(() => _message = res.error ?? 'تم إنشاء/تحديث الراعي');
     _refresh();
+  }
+
+  Future<void> _fillSponsorCurrentLocation() async {
+    setState(() => _locating = true);
+    final location = await readBrowserLocation();
+    if (!mounted) return;
+    if (location == null) {
+      setState(() {
+        _locating = false;
+        _message = 'المتصفح ما عطانا الموقع. فعّل إذن الموقع وحاول مرة ثانية.';
+      });
+      return;
+    }
+    setState(() {
+      _locating = false;
+      _lockEnabled = true;
+      _latCtrl.text = location.latitude.toStringAsFixed(7);
+      _lngCtrl.text = location.longitude.toStringAsFixed(7);
+      _message = location.accuracy == null
+          ? 'تم أخذ موقع الأدمن'
+          : 'تم أخذ موقع الأدمن بدقة تقريبية ${location.accuracy!.round()}م';
+    });
   }
 
   Future<void> _addSponsorGame() async {
@@ -744,65 +845,183 @@ class _SponsorTabState extends State<SponsorTab> {
     final accCtrl = TextEditingController(
       text: s['themeAccent']?.toString() ?? '',
     );
+    final latCtrl = TextEditingController(
+      text: s['anchorLat'] == null ? '' : _formatCoord(s['anchorLat']),
+    );
+    final lngCtrl = TextEditingController(
+      text: s['anchorLng'] == null ? '' : _formatCoord(s['anchorLng']),
+    );
+    final radiusCtrl = TextEditingController(
+      text: ((s['radiusMeters'] as num?)?.toInt() ?? 100).toString(),
+    );
+    var lockEnabled = s['locationLock'] == true;
+    var locating = false;
     await showDialog(
       context: context,
-      builder: (_) => AlertDialog(
-        title: Text('تعديل الراعي $code'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameCtrl,
-                decoration: const InputDecoration(labelText: 'اسم الراعي'),
-              ),
-              TextField(
-                controller: imgCtrl,
-                decoration: const InputDecoration(labelText: 'رابط الصورة'),
-              ),
-              const SizedBox(height: 8),
-              _colorField(
-                label: 'لون أساسي',
-                controller: primCtrl,
-                context: context,
-              ),
-              const SizedBox(height: 8),
-              _colorField(
-                label: 'لون ثانوي',
-                controller: accCtrl,
-                context: context,
-              ),
-            ],
+      builder: (_) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text('تعديل الراعي $code'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameCtrl,
+                  decoration: const InputDecoration(labelText: 'اسم الراعي'),
+                ),
+                TextField(
+                  controller: imgCtrl,
+                  decoration: const InputDecoration(labelText: 'رابط الصورة'),
+                ),
+                const SizedBox(height: 8),
+                _colorField(
+                  label: 'لون أساسي',
+                  controller: primCtrl,
+                  context: context,
+                ),
+                const SizedBox(height: 8),
+                _colorField(
+                  label: 'لون ثانوي',
+                  controller: accCtrl,
+                  context: context,
+                ),
+                const Divider(height: 24),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('قفل ألعاب الراعي بالموقع'),
+                  subtitle: const Text(
+                    'اختياري. يستخدم موقع الأدمن كنقطة اللعب.',
+                  ),
+                  value: lockEnabled,
+                  onChanged: (v) => setDialogState(() => lockEnabled = v),
+                ),
+                if (lockEnabled) ...[
+                  _responsiveFormLine(
+                    fields: [
+                      TextField(
+                        controller: latCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Latitude',
+                        ),
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                          signed: true,
+                        ),
+                      ),
+                      TextField(
+                        controller: lngCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Longitude',
+                        ),
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                          signed: true,
+                        ),
+                      ),
+                      TextField(
+                        controller: radiusCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'النطاق بالمتر',
+                        ),
+                        keyboardType: TextInputType.number,
+                      ),
+                    ],
+                    actions: [
+                      OutlinedButton.icon(
+                        onPressed: locating
+                            ? null
+                            : () async {
+                                setDialogState(() => locating = true);
+                                final location = await readBrowserLocation();
+                                if (!context.mounted) return;
+                                setDialogState(() => locating = false);
+                                if (location == null) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        'المتصفح ما عطانا الموقع. فعّل إذن الموقع.',
+                                      ),
+                                    ),
+                                  );
+                                  return;
+                                }
+                                latCtrl.text = location.latitude
+                                    .toStringAsFixed(7);
+                                lngCtrl.text = location.longitude
+                                    .toStringAsFixed(7);
+                              },
+                        icon: locating
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.my_location),
+                        label: const Text('موقعي'),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('إلغاء'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final navigator = Navigator.of(context);
+                final lat = double.tryParse(latCtrl.text.trim());
+                final lng = double.tryParse(lngCtrl.text.trim());
+                final radius = int.tryParse(radiusCtrl.text.trim());
+                if (lockEnabled && (lat == null || lng == null)) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'أدخل Latitude و Longitude أو استخدم موقعي',
+                      ),
+                    ),
+                  );
+                  return;
+                }
+                await widget.api.patch(
+                  '/admin/sponsors/$code',
+                  body: {
+                    'name': nameCtrl.text.trim(),
+                    'imageUrl': imgCtrl.text.trim(),
+                    'themePrimary': primCtrl.text.trim(),
+                    'themeAccent': accCtrl.text.trim(),
+                    'locationLock': lockEnabled,
+                    if (lockEnabled && lat != null) 'lockLat': lat,
+                    if (lockEnabled && lng != null) 'lockLng': lng,
+                    if (lockEnabled && radius != null) 'lockRadius': radius,
+                  },
+                );
+                if (mounted) navigator.pop();
+                _refresh();
+              },
+              child: const Text('حفظ'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('إلغاء'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              await widget.api.patch(
-                '/admin/sponsors/$code',
-                body: {
-                  'name': nameCtrl.text.trim(),
-                  'imageUrl': imgCtrl.text.trim(),
-                  'themePrimary': primCtrl.text.trim(),
-                  'themeAccent': accCtrl.text.trim(),
-                },
-              );
-              if (mounted) Navigator.pop(context);
-              _refresh();
-            },
-            child: const Text('حفظ'),
-          ),
-        ],
       ),
     );
   }
 
   Future<void> _deleteSponsor(String code) async {
     await widget.api.delete('/admin/sponsors/$code');
+    _refresh();
+  }
+
+  Future<void> _snapshotSponsor(String code) async {
+    final res = await widget.api.post(
+      '/admin/sponsors/$code/monthly-leaders/snapshot',
+    );
+    setState(() => _message = res.error ?? 'تم حفظ نتيجة الشهر للراعي');
     _refresh();
   }
 
@@ -861,6 +1080,7 @@ class _SponsorTabState extends State<SponsorTab> {
                       final imageUrl = (s['imageUrl'] ?? '').toString();
                       final themePrim = (s['themePrimary'] ?? '').toString();
                       final themeAcc = (s['themeAccent'] ?? '').toString();
+                      final monthlyLeaders = s['monthlyLeaders'];
                       return Card(
                         child: Padding(
                           padding: const EdgeInsets.all(12),
@@ -877,15 +1097,34 @@ class _SponsorTabState extends State<SponsorTab> {
                               ),
                               const SizedBox(height: 6),
                               if (imageUrl.isNotEmpty)
-                                Text(
-                                  'صورة: $imageUrl',
-                                  style: const TextStyle(fontSize: 12),
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: SizedBox(
+                                    height: 92,
+                                    width: double.infinity,
+                                    child: Image.network(
+                                      imageUrl,
+                                      fit: BoxFit.cover,
+                                      errorBuilder:
+                                          (context, error, stackTrace) =>
+                                              Container(
+                                                color: Colors.grey.shade200,
+                                                alignment: Alignment.center,
+                                                child: const Text(
+                                                  'تعذر تحميل صورة الراعي',
+                                                ),
+                                              ),
+                                    ),
+                                  ),
                                 ),
                               if (themePrim.isNotEmpty || themeAcc.isNotEmpty)
                                 Text(
                                   'الألوان: $themePrim / $themeAcc',
                                   style: const TextStyle(fontSize: 12),
                                 ),
+                              const SizedBox(height: 4),
+                              _locationLockStatus(s),
+                              const SizedBox(height: 8),
                               if (games.isEmpty)
                                 const Text('لا توجد ألعاب مربوطة')
                               else
@@ -907,6 +1146,8 @@ class _SponsorTabState extends State<SponsorTab> {
                                   }).toList(),
                                 ),
                               const SizedBox(height: 8),
+                              _monthlyLeadersBlock(monthlyLeaders),
+                              const SizedBox(height: 8),
                               Wrap(
                                 spacing: 8,
                                 runSpacing: 4,
@@ -914,6 +1155,14 @@ class _SponsorTabState extends State<SponsorTab> {
                                   TextButton(
                                     onPressed: () => _editSponsor(s),
                                     child: const Text('تعديل'),
+                                  ),
+                                  TextButton.icon(
+                                    onPressed: () => _snapshotSponsor(code),
+                                    icon: const Icon(
+                                      Icons.emoji_events_outlined,
+                                      size: 18,
+                                    ),
+                                    label: const Text('حفظ نتيجة الشهر'),
                                   ),
                                   TextButton(
                                     onPressed: () => _deleteSponsor(code),
@@ -962,6 +1211,13 @@ class _SponsorTabState extends State<SponsorTab> {
                         labelText: 'اسم الراعي',
                       ),
                     ),
+                    TextField(
+                      controller: _imageUrlCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'رابط صورة المربع',
+                        hintText: 'https://...',
+                      ),
+                    ),
                   ],
                   actions: [
                     ElevatedButton(
@@ -982,6 +1238,67 @@ class _SponsorTabState extends State<SponsorTab> {
                   controller: _themeAccCtrl,
                   context: context,
                 ),
+                const SizedBox(height: 8),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('قفل ألعاب الراعي بمنطقة محددة'),
+                  subtitle: const Text(
+                    'اختياري. إذا تفعل، اللاعب لازم يكون داخل النطاق.',
+                  ),
+                  value: _lockEnabled,
+                  onChanged: (v) => setState(() => _lockEnabled = v),
+                ),
+                if (_lockEnabled) ...[
+                  _responsiveFormLine(
+                    fields: [
+                      TextField(
+                        controller: _latCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Latitude',
+                        ),
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                          signed: true,
+                        ),
+                      ),
+                      TextField(
+                        controller: _lngCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Longitude',
+                        ),
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                          signed: true,
+                        ),
+                      ),
+                      TextField(
+                        controller: _radiusCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'النطاق بالمتر',
+                        ),
+                        keyboardType: TextInputType.number,
+                      ),
+                    ],
+                    actions: [
+                      OutlinedButton.icon(
+                        onPressed: _locating
+                            ? null
+                            : _fillSponsorCurrentLocation,
+                        icon: _locating
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.my_location),
+                        label: const Text('استخدام موقعي'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                ],
                 const SizedBox(height: 8),
                 _responsiveFormLine(
                   fields: [
@@ -1017,11 +1334,6 @@ class _SponsorTabState extends State<SponsorTab> {
                   const SizedBox(height: 8),
                   Text(_message!, style: const TextStyle(color: Colors.blue)),
                 ],
-                const SizedBox(height: 6),
-                const Text(
-                  'ملاحظة: نحتاج endpoints إدارية في الباكند (/admin/sponsors، /admin/sponsors/:code/games) لتعمل هذه الأزرار.',
-                  style: TextStyle(fontSize: 12, color: Colors.grey),
-                ),
               ],
             ),
           ),
@@ -1072,11 +1384,6 @@ class _SponsorTabState extends State<SponsorTab> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 6),
-                const Text(
-                  'إدارة ألعاب الراعي الحالي (تحتاج دعم endpoint في الباكند).',
-                  style: TextStyle(fontSize: 12, color: Colors.grey),
-                ),
               ],
             ),
           ),
@@ -1111,6 +1418,7 @@ class _DewanyahTabState extends State<DewanyahTab> {
   String? _msg;
   bool _lockEnabled = false;
   bool _requireApproval = true;
+  bool _locating = false;
   Future<ApiResponse>? _requestsFuture;
   Future<ApiResponse>? _listFuture;
 
@@ -1192,6 +1500,10 @@ class _DewanyahTabState extends State<DewanyahTab> {
       lng = null;
       radius = null;
     }
+    if (_lockEnabled && (lat == null || lng == null)) {
+      setState(() => _msg = 'فعّل الموقع بعد ما تعبّي Latitude و Longitude');
+      return;
+    }
 
     final res = await widget.api.post(
       '/admin/dewanyah',
@@ -1203,6 +1515,7 @@ class _DewanyahTabState extends State<DewanyahTab> {
         'gameId': game,
         'note': _noteCtrl.text.trim(),
         'requireApproval': _requireApproval,
+        'locationLock': _lockEnabled,
         if (lat != null && lng != null) 'lockLat': lat,
         if (lat != null && lng != null) 'lockLng': lng,
         if (radius != null) 'lockRadius': radius,
@@ -1210,11 +1523,31 @@ class _DewanyahTabState extends State<DewanyahTab> {
         if (themeAccent.isNotEmpty) 'themeAccent': themeAccent,
       },
     );
-    setState(
-      () => _msg = res.error ?? 'تم طلب إنشاء الديوانية (تأكد من دعم الباكند)',
-    );
+    setState(() => _msg = res.error ?? 'تم إنشاء الديوانية');
     _refreshRequests();
     _refreshList();
+  }
+
+  Future<void> _fillDewanyahCurrentLocation() async {
+    setState(() => _locating = true);
+    final location = await readBrowserLocation();
+    if (!mounted) return;
+    if (location == null) {
+      setState(() {
+        _locating = false;
+        _msg = 'المتصفح ما عطانا الموقع. فعّل إذن الموقع وحاول مرة ثانية.';
+      });
+      return;
+    }
+    setState(() {
+      _locating = false;
+      _lockEnabled = true;
+      _latCtrl.text = location.latitude.toStringAsFixed(7);
+      _lngCtrl.text = location.longitude.toStringAsFixed(7);
+      _msg = location.accuracy == null
+          ? 'تم أخذ موقع الأدمن'
+          : 'تم أخذ موقع الأدمن بدقة تقريبية ${location.accuracy!.round()}م';
+    });
   }
 
   Future<void> _editDewanyah(Map<String, dynamic> d) async {
@@ -1236,80 +1569,197 @@ class _DewanyahTabState extends State<DewanyahTab> {
     final accCtrl = TextEditingController(
       text: d['themeAccent']?.toString() ?? '',
     );
+    final latCtrl = TextEditingController(
+      text: d['anchorLat'] == null ? '' : _formatCoord(d['anchorLat']),
+    );
+    final lngCtrl = TextEditingController(
+      text: d['anchorLng'] == null ? '' : _formatCoord(d['anchorLng']),
+    );
+    final radiusCtrl = TextEditingController(
+      text: ((d['radiusMeters'] as num?)?.toInt() ?? 100).toString(),
+    );
+    var lockEnabled = d['locationLock'] == true;
+    var locating = false;
     await showDialog(
       context: context,
-      builder: (_) => AlertDialog(
-        title: Text('تعديل الديوانية'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameCtrl,
-                decoration: const InputDecoration(labelText: 'الاسم'),
-              ),
-              TextField(
-                controller: ownerCtrl,
-                decoration: const InputDecoration(labelText: 'اسم المالك'),
-              ),
-              TextField(
-                controller: emailCtrl,
-                decoration: const InputDecoration(labelText: 'إيميل المالك'),
-              ),
-              TextField(
-                controller: noteCtrl,
-                decoration: const InputDecoration(labelText: 'ملاحظات'),
-              ),
-              TextField(
-                controller: imgCtrl,
-                decoration: const InputDecoration(labelText: 'رابط الصورة'),
-              ),
-              const SizedBox(height: 8),
-              _colorField(
-                label: 'لون أساسي',
-                controller: primCtrl,
-                context: context,
-              ),
-              const SizedBox(height: 8),
-              _colorField(
-                label: 'لون ثانوي',
-                controller: accCtrl,
-                context: context,
-              ),
-            ],
+      builder: (_) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('تعديل الديوانية'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameCtrl,
+                  decoration: const InputDecoration(labelText: 'الاسم'),
+                ),
+                TextField(
+                  controller: ownerCtrl,
+                  decoration: const InputDecoration(labelText: 'اسم المالك'),
+                ),
+                TextField(
+                  controller: emailCtrl,
+                  decoration: const InputDecoration(labelText: 'إيميل المالك'),
+                ),
+                TextField(
+                  controller: noteCtrl,
+                  decoration: const InputDecoration(labelText: 'ملاحظات'),
+                ),
+                TextField(
+                  controller: imgCtrl,
+                  decoration: const InputDecoration(labelText: 'رابط الصورة'),
+                ),
+                const SizedBox(height: 8),
+                _colorField(
+                  label: 'لون أساسي',
+                  controller: primCtrl,
+                  context: context,
+                ),
+                const SizedBox(height: 8),
+                _colorField(
+                  label: 'لون ثانوي',
+                  controller: accCtrl,
+                  context: context,
+                ),
+                const Divider(height: 24),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('قفل الديوانية بالموقع'),
+                  subtitle: const Text(
+                    'اختياري. يستخدم موقع الأدمن كنقطة اللعب.',
+                  ),
+                  value: lockEnabled,
+                  onChanged: (v) => setDialogState(() => lockEnabled = v),
+                ),
+                if (lockEnabled)
+                  _responsiveFormLine(
+                    fields: [
+                      TextField(
+                        controller: latCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Latitude',
+                        ),
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                          signed: true,
+                        ),
+                      ),
+                      TextField(
+                        controller: lngCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Longitude',
+                        ),
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                          signed: true,
+                        ),
+                      ),
+                      TextField(
+                        controller: radiusCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'النطاق بالمتر',
+                        ),
+                        keyboardType: TextInputType.number,
+                      ),
+                    ],
+                    actions: [
+                      OutlinedButton.icon(
+                        onPressed: locating
+                            ? null
+                            : () async {
+                                setDialogState(() => locating = true);
+                                final location = await readBrowserLocation();
+                                if (!context.mounted) return;
+                                setDialogState(() => locating = false);
+                                if (location == null) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        'المتصفح ما عطانا الموقع. فعّل إذن الموقع.',
+                                      ),
+                                    ),
+                                  );
+                                  return;
+                                }
+                                latCtrl.text = location.latitude
+                                    .toStringAsFixed(7);
+                                lngCtrl.text = location.longitude
+                                    .toStringAsFixed(7);
+                              },
+                        icon: locating
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.my_location),
+                        label: const Text('موقعي'),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('إلغاء'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final navigator = Navigator.of(context);
+                final lat = double.tryParse(latCtrl.text.trim());
+                final lng = double.tryParse(lngCtrl.text.trim());
+                final radius = int.tryParse(radiusCtrl.text.trim());
+                if (lockEnabled && (lat == null || lng == null)) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'أدخل Latitude و Longitude أو استخدم موقعي',
+                      ),
+                    ),
+                  );
+                  return;
+                }
+                await widget.api.patch(
+                  '/admin/dewanyah/$id',
+                  body: {
+                    'name': nameCtrl.text.trim(),
+                    'ownerName': ownerCtrl.text.trim(),
+                    'ownerEmail': emailCtrl.text.trim(),
+                    'note': noteCtrl.text.trim(),
+                    'imageUrl': imgCtrl.text.trim(),
+                    'themePrimary': primCtrl.text.trim(),
+                    'themeAccent': accCtrl.text.trim(),
+                    'locationLock': lockEnabled,
+                    if (lockEnabled && lat != null) 'lockLat': lat,
+                    if (lockEnabled && lng != null) 'lockLng': lng,
+                    if (lockEnabled && radius != null) 'lockRadius': radius,
+                  },
+                );
+                if (mounted) navigator.pop();
+                _refreshList();
+              },
+              child: const Text('حفظ'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('إلغاء'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              await widget.api.patch(
-                '/admin/dewanyah/$id',
-                body: {
-                  'name': nameCtrl.text.trim(),
-                  'ownerName': ownerCtrl.text.trim(),
-                  'ownerEmail': emailCtrl.text.trim(),
-                  'note': noteCtrl.text.trim(),
-                  'imageUrl': imgCtrl.text.trim(),
-                  'themePrimary': primCtrl.text.trim(),
-                  'themeAccent': accCtrl.text.trim(),
-                },
-              );
-              if (mounted) Navigator.pop(context);
-              _refreshList();
-            },
-            child: const Text('حفظ'),
-          ),
-        ],
       ),
     );
   }
 
   Future<void> _deleteDewanyah(String id) async {
     await widget.api.delete('/admin/dewanyah/$id');
+    _refreshList();
+  }
+
+  Future<void> _snapshotDewanyah(String id) async {
+    final res = await widget.api.post(
+      '/admin/dewanyah/$id/monthly-leaders/snapshot',
+    );
+    setState(() => _msg = res.error ?? 'تم حفظ نتيجة الشهر للديوانية');
     _refreshList();
   }
 
@@ -1323,15 +1773,6 @@ class _DewanyahTabState extends State<DewanyahTab> {
           const Text(
             'الديوانيات',
             style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18),
-          ),
-          const SizedBox(height: 8),
-          const Card(
-            child: Padding(
-              padding: EdgeInsets.all(12),
-              child: Text(
-                'عرض/إدارة الديوانيات يتطلب endpoints إدارية (لم تُحدد بعد في الباكند).',
-              ),
-            ),
           ),
           const SizedBox(height: 8),
           Card(
@@ -1412,41 +1853,51 @@ class _DewanyahTabState extends State<DewanyahTab> {
                   ),
                   if (_lockEnabled) ...[
                     const SizedBox(height: 6),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _latCtrl,
-                            decoration: const InputDecoration(
-                              labelText: 'Latitude',
-                            ),
-                            keyboardType: TextInputType.numberWithOptions(
-                              decimal: true,
-                              signed: true,
-                            ),
+                    _responsiveFormLine(
+                      fields: [
+                        TextField(
+                          controller: _latCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Latitude',
+                          ),
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                            signed: true,
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: TextField(
-                            controller: _lngCtrl,
-                            decoration: const InputDecoration(
-                              labelText: 'Longitude',
-                            ),
-                            keyboardType: TextInputType.numberWithOptions(
-                              decimal: true,
-                              signed: true,
-                            ),
+                        TextField(
+                          controller: _lngCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Longitude',
+                          ),
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                            signed: true,
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        SizedBox(
-                          width: 110,
-                          child: TextField(
-                            controller: _radiusCtrl,
-                            decoration: const InputDecoration(labelText: 'متر'),
-                            keyboardType: TextInputType.number,
+                        TextField(
+                          controller: _radiusCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'النطاق بالمتر',
                           ),
+                          keyboardType: TextInputType.number,
+                        ),
+                      ],
+                      actions: [
+                        OutlinedButton.icon(
+                          onPressed: _locating
+                              ? null
+                              : _fillDewanyahCurrentLocation,
+                          icon: _locating
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.my_location),
+                          label: const Text('استخدام موقعي'),
                         ),
                       ],
                     ),
@@ -1471,11 +1922,6 @@ class _DewanyahTabState extends State<DewanyahTab> {
                     const SizedBox(height: 6),
                     Text(_msg!, style: const TextStyle(color: Colors.blue)),
                   ],
-                  const SizedBox(height: 6),
-                  const Text(
-                    'نحتاج إضافة endpoint مثل POST /admin/dewanyah في الباكند ليعمل هذا الإجراء.',
-                    style: TextStyle(fontSize: 12, color: Colors.grey),
-                  ),
                 ],
               ),
             ),
@@ -1542,6 +1988,7 @@ class _DewanyahTabState extends State<DewanyahTab> {
                               : (d['gameId'] ?? '').toString();
                           final members = (d['_count']?['members'] ?? 0)
                               .toString();
+                          final monthlyLeaders = d['monthlyLeaders'];
                           return ListTile(
                             title: Text(
                               '$name — $game',
@@ -1561,6 +2008,10 @@ class _DewanyahTabState extends State<DewanyahTab> {
                                 ),
                                 if (owner.isNotEmpty) Text('المالك: $owner'),
                                 Text('الأعضاء: $members'),
+                                const SizedBox(height: 4),
+                                _locationLockStatus(d),
+                                const SizedBox(height: 6),
+                                _monthlyLeadersBlock(monthlyLeaders),
                               ],
                             ),
                             trailing: Wrap(
@@ -1585,6 +2036,14 @@ class _DewanyahTabState extends State<DewanyahTab> {
                                 TextButton(
                                   onPressed: () => _editDewanyah(d),
                                   child: const Text('تعديل'),
+                                ),
+                                TextButton.icon(
+                                  onPressed: () => _snapshotDewanyah(id),
+                                  icon: const Icon(
+                                    Icons.emoji_events_outlined,
+                                    size: 18,
+                                  ),
+                                  label: const Text('حفظ النتيجة'),
                                 ),
                                 TextButton(
                                   onPressed: () => _deleteDewanyah(id),
@@ -1652,11 +2111,6 @@ class _DewanyahTabState extends State<DewanyahTab> {
                         label: const Text('إضافة'),
                       ),
                     ],
-                  ),
-                  const SizedBox(height: 6),
-                  const Text(
-                    'تحتاج endpoint مثل POST /admin/dewanyah/:id/games في الباكند.',
-                    style: TextStyle(fontSize: 12, color: Colors.grey),
                   ),
                 ],
               ),
@@ -1872,7 +2326,7 @@ class _UsersTabState extends State<UsersTab> {
                         child: TextField(
                           controller: _searchCtrl,
                           decoration: const InputDecoration(
-                            labelText: 'بحث (إيميل/اسم/User ID)',
+                            labelText: 'بحث (إيميل/اسم/User ID/Public ID/رقم)',
                           ),
                           onSubmitted: (_) => _refresh(),
                         ),
