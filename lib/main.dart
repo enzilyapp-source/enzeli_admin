@@ -1,11 +1,15 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flex_color_picker/flex_color_picker.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'admin_file_upload.dart';
 import 'admin_location.dart';
+import 'report_export.dart';
+part 'admin_operations.dart';
 
 // Base URL for the existing backend (Nest + Prisma). Override via:
 // flutter run -d chrome --dart-define=API_BASE_URL=https://api.example.com
@@ -148,12 +152,15 @@ class AuthState extends ChangeNotifier {
 class ApiResponse {
   final dynamic data; // can be Map or List based on backend response
   final String? error;
-  ApiResponse({required this.data, this.error});
+  final int? statusCode;
+  final String? code;
+  ApiResponse({required this.data, this.error, this.statusCode, this.code});
 }
 
 class ApiClient {
   final String? token;
-  const ApiClient({required this.token});
+  final http.Client? client;
+  const ApiClient({required this.token, this.client});
 
   Map<String, String> _headers() {
     return {
@@ -162,21 +169,53 @@ class ApiClient {
     };
   }
 
+  Map<String, String> _authHeaders() {
+    return {
+      if (token != null && token!.isNotEmpty) 'Authorization': 'Bearer $token',
+    };
+  }
+
+  ApiResponse _failure(
+    http.Response response,
+    String path,
+    Map<String, dynamic> body,
+  ) {
+    if (response.statusCode == 404 &&
+        (path.startsWith('/admin/operations') ||
+            path.startsWith('/admin/reports'))) {
+      return ApiResponse(
+        data: const {},
+        statusCode: 404,
+        code: 'SERVER_UPDATE_REQUIRED',
+        error:
+            'نسخة الخادم الحالية لا تدعم هذه الصفحة بعد. يلزم نشر تحديث السيرفر لتفعيلها، ثم اضغط إعادة المحاولة.',
+      );
+    }
+    return ApiResponse(
+      data: const {},
+      statusCode: response.statusCode,
+      code: body['code']?.toString(),
+      error: response.statusCode == 401 || response.statusCode == 403
+          ? 'الجلسة منتهية أو الحساب لا يملك صلاحية الأدمن. سجّل الدخول مجددًا.'
+          : body['message']?.toString() ?? 'تعذر تنفيذ الطلب',
+    );
+  }
+
   Uri _uri(String path) => Uri.parse('$apiBaseUrl$path');
 
   Future<ApiResponse> get(String path) async {
     try {
-      final resp = await http.get(_uri(path), headers: _headers());
+      final resp = await (client?.get ?? http.get)(
+        _uri(path),
+        headers: _headers(),
+      );
       final m = jsonDecode(resp.body) as Map<String, dynamic>;
       if (resp.statusCode >= 200 &&
           resp.statusCode < 300 &&
           (m['ok'] != false)) {
         return ApiResponse(data: m['data'] ?? m);
       }
-      return ApiResponse(
-        data: const {},
-        error: m['message']?.toString() ?? 'Request failed',
-      );
+      return _failure(resp, path, m);
     } catch (e) {
       return ApiResponse(data: const {}, error: e.toString());
     }
@@ -184,7 +223,7 @@ class ApiClient {
 
   Future<ApiResponse> post(String path, {Map<String, dynamic>? body}) async {
     try {
-      final resp = await http.post(
+      final resp = await (client?.post ?? http.post)(
         _uri(path),
         headers: _headers(),
         body: jsonEncode(body ?? const {}),
@@ -195,10 +234,7 @@ class ApiClient {
           (m['ok'] != false)) {
         return ApiResponse(data: m['data'] ?? m);
       }
-      return ApiResponse(
-        data: const {},
-        error: m['message']?.toString() ?? 'Request failed',
-      );
+      return _failure(resp, path, m);
     } catch (e) {
       return ApiResponse(data: const {}, error: e.toString());
     }
@@ -206,7 +242,7 @@ class ApiClient {
 
   Future<ApiResponse> patch(String path, {Map<String, dynamic>? body}) async {
     try {
-      final resp = await http.patch(
+      final resp = await (client?.patch ?? http.patch)(
         _uri(path),
         headers: _headers(),
         body: jsonEncode(body ?? const {}),
@@ -217,10 +253,7 @@ class ApiClient {
           (m['ok'] != false)) {
         return ApiResponse(data: m['data'] ?? m);
       }
-      return ApiResponse(
-        data: const {},
-        error: m['message']?.toString() ?? 'Request failed',
-      );
+      return _failure(resp, path, m);
     } catch (e) {
       return ApiResponse(data: const {}, error: e.toString());
     }
@@ -228,10 +261,45 @@ class ApiClient {
 
   Future<ApiResponse> delete(String path) async {
     try {
-      final resp = await http.delete(_uri(path), headers: _headers());
+      final resp = await (client?.delete ?? http.delete)(
+        _uri(path),
+        headers: _headers(),
+      );
       final m = jsonDecode(resp.body) as Map<String, dynamic>;
       if (resp.statusCode >= 200 &&
           resp.statusCode < 300 &&
+          (m['ok'] != false)) {
+        return ApiResponse(data: m['data'] ?? m);
+      }
+      return _failure(resp, path, m);
+    } catch (e) {
+      return ApiResponse(data: const {}, error: e.toString());
+    }
+  }
+
+  Future<ApiResponse> uploadFile(
+    String path, {
+    required List<int> bytes,
+    required String filename,
+    required String fieldName,
+    required String mimeType,
+  }) async {
+    try {
+      final req = http.MultipartRequest('POST', _uri(path));
+      req.headers.addAll(_authHeaders());
+      req.files.add(
+        http.MultipartFile.fromBytes(
+          fieldName,
+          bytes,
+          filename: filename,
+          contentType: MediaType.parse(mimeType),
+        ),
+      );
+      final streamed = await req.send();
+      final text = await streamed.stream.bytesToString();
+      final m = jsonDecode(text) as Map<String, dynamic>;
+      if (streamed.statusCode >= 200 &&
+          streamed.statusCode < 300 &&
           (m['ok'] != false)) {
         return ApiResponse(data: m['data'] ?? m);
       }
@@ -597,6 +665,17 @@ class _AdminShellState extends State<AdminShell> {
     final tabs = [
       _TabData('Sponsors', Icons.work_outline, SponsorTab(api: api)),
       _TabData('Dewanyah', Icons.groups_3_outlined, DewanyahTab(api: api)),
+      _TabData('التقارير', Icons.analytics_outlined, ReportsTab(api: api)),
+      _TabData(
+        'الألعاب',
+        Icons.sports_esports_outlined,
+        GameVisibilityTab(api: api),
+      ),
+      _TabData(
+        'الصيانة',
+        Icons.construction_outlined,
+        MaintenanceTab(api: api),
+      ),
       _TabData('Users', Icons.verified_user_outlined, UsersTab(api: api)),
       _TabData(
         'Notifications',
@@ -659,17 +738,23 @@ class _AdminShellState extends State<AdminShell> {
         ],
       ),
       bottomNavigationBar: MediaQuery.of(context).size.width < 900
-          ? NavigationBar(
-              selectedIndex: _tab,
-              onDestinationSelected: (i) => setState(() => _tab = i),
-              destinations: tabs
-                  .map(
-                    (t) => NavigationDestination(
-                      icon: Icon(t.icon),
-                      label: t.title,
-                    ),
-                  )
-                  .toList(),
+          ? SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: SizedBox(
+                width: 760,
+                child: NavigationBar(
+                  selectedIndex: _tab,
+                  onDestinationSelected: (i) => setState(() => _tab = i),
+                  destinations: tabs
+                      .map(
+                        (t) => NavigationDestination(
+                          icon: Icon(t.icon),
+                          label: t.title,
+                        ),
+                      )
+                      .toList(),
+                ),
+              ),
             )
           : null,
     );
@@ -709,6 +794,8 @@ class _SponsorTabState extends State<SponsorTab> {
   String? _message;
   bool _lockEnabled = false;
   bool _locating = false;
+  PickedAdminFile? _newSponsorImageFile;
+  bool _uploadingSponsorImage = false;
 
   @override
   void initState() {
@@ -740,6 +827,53 @@ class _SponsorTabState extends State<SponsorTab> {
     });
   }
 
+  String? _validateSponsorImage(PickedAdminFile file) {
+    const maxBytes = 2 * 1024 * 1024;
+    final mime = file.mimeType.toLowerCase();
+    final name = file.name.toLowerCase();
+    final supported =
+        mime == 'image/jpeg' ||
+        mime == 'image/png' ||
+        mime == 'image/webp' ||
+        name.endsWith('.jpg') ||
+        name.endsWith('.jpeg') ||
+        name.endsWith('.png') ||
+        name.endsWith('.webp');
+    if (!supported) return 'الصورة لازم تكون JPG أو PNG أو WebP';
+    if (file.bytes.length > maxBytes) return 'حجم الصورة لازم يكون 2MB أو أقل';
+    return null;
+  }
+
+  Future<PickedAdminFile?> _pickSponsorImage() async {
+    final file = await pickSponsorImageFile();
+    if (!mounted || file == null) return null;
+    final validation = _validateSponsorImage(file);
+    if (validation != null) {
+      setState(() => _message = validation);
+      return null;
+    }
+    return file;
+  }
+
+  Future<ApiResponse> _uploadSponsorImage(String code, PickedAdminFile file) {
+    return widget.api.uploadFile(
+      '/admin/sponsors/${Uri.encodeComponent(code)}/image',
+      bytes: file.bytes,
+      filename: file.name,
+      fieldName: 'image',
+      mimeType: file.mimeType,
+    );
+  }
+
+  Future<void> _pickNewSponsorImage() async {
+    final file = await _pickSponsorImage();
+    if (!mounted || file == null) return;
+    setState(() {
+      _newSponsorImageFile = file;
+      _message = 'تم اختيار الصورة: ${file.name}';
+    });
+  }
+
   Future<void> _createSponsor() async {
     final code = _codeCtrl.text.trim();
     final name = _nameCtrl.text.trim();
@@ -759,6 +893,7 @@ class _SponsorTabState extends State<SponsorTab> {
       );
       return;
     }
+    setState(() => _uploadingSponsorImage = true);
     final res = await widget.api.post(
       '/admin/sponsors',
       body: {
@@ -773,7 +908,20 @@ class _SponsorTabState extends State<SponsorTab> {
         if (_lockEnabled && radius != null) 'lockRadius': radius,
       },
     );
-    setState(() => _message = res.error ?? 'تم إنشاء/تحديث الراعي');
+    var message = res.error ?? 'تم إنشاء/تحديث الراعي';
+    if (res.error == null && _newSponsorImageFile != null) {
+      final uploadRes = await _uploadSponsorImage(code, _newSponsorImageFile!);
+      message = uploadRes.error ?? 'تم إنشاء الراعي ورفع الصورة';
+      if (uploadRes.error == null) {
+        _newSponsorImageFile = null;
+        _imageUrlCtrl.clear();
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _uploadingSponsorImage = false;
+      _message = message;
+    });
     _refresh();
   }
 
@@ -856,6 +1004,8 @@ class _SponsorTabState extends State<SponsorTab> {
     );
     var lockEnabled = s['locationLock'] == true;
     var locating = false;
+    var uploadingImage = false;
+    PickedAdminFile? pickedImage;
     await showDialog(
       context: context,
       builder: (_) => StatefulBuilder(
@@ -871,7 +1021,37 @@ class _SponsorTabState extends State<SponsorTab> {
                 ),
                 TextField(
                   controller: imgCtrl,
-                  decoration: const InputDecoration(labelText: 'رابط الصورة'),
+                  decoration: const InputDecoration(
+                    labelText: 'رابط الصورة أو ارفعي من الجهاز',
+                    hintText: 'https://... اختياري',
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: uploadingImage
+                            ? null
+                            : () async {
+                                final file = await _pickSponsorImage();
+                                if (!context.mounted || file == null) return;
+                                setDialogState(() => pickedImage = file);
+                              },
+                        icon: const Icon(Icons.upload_file),
+                        label: const Text('اختيار صورة من الجهاز'),
+                      ),
+                      Text(
+                        pickedImage?.name ??
+                            'الأفضل 1200×1200، JPG/PNG/WebP، أقل من 2MB',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
                 ),
                 const SizedBox(height: 8),
                 _colorField(
@@ -973,38 +1153,65 @@ class _SponsorTabState extends State<SponsorTab> {
               child: const Text('إلغاء'),
             ),
             ElevatedButton(
-              onPressed: () async {
-                final navigator = Navigator.of(context);
-                final lat = double.tryParse(latCtrl.text.trim());
-                final lng = double.tryParse(lngCtrl.text.trim());
-                final radius = int.tryParse(radiusCtrl.text.trim());
-                if (lockEnabled && (lat == null || lng == null)) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        'أدخل Latitude و Longitude أو استخدم موقعي',
-                      ),
-                    ),
-                  );
-                  return;
-                }
-                await widget.api.patch(
-                  '/admin/sponsors/$code',
-                  body: {
-                    'name': nameCtrl.text.trim(),
-                    'imageUrl': imgCtrl.text.trim(),
-                    'themePrimary': primCtrl.text.trim(),
-                    'themeAccent': accCtrl.text.trim(),
-                    'locationLock': lockEnabled,
-                    if (lockEnabled && lat != null) 'lockLat': lat,
-                    if (lockEnabled && lng != null) 'lockLng': lng,
-                    if (lockEnabled && radius != null) 'lockRadius': radius,
-                  },
-                );
-                if (mounted) navigator.pop();
-                _refresh();
-              },
-              child: const Text('حفظ'),
+              onPressed: uploadingImage
+                  ? null
+                  : () async {
+                      final navigator = Navigator.of(context);
+                      final lat = double.tryParse(latCtrl.text.trim());
+                      final lng = double.tryParse(lngCtrl.text.trim());
+                      final radius = int.tryParse(radiusCtrl.text.trim());
+                      if (lockEnabled && (lat == null || lng == null)) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              'أدخل Latitude و Longitude أو استخدم موقعي',
+                            ),
+                          ),
+                        );
+                        return;
+                      }
+                      setDialogState(() => uploadingImage = true);
+                      final patchRes = await widget.api.patch(
+                        '/admin/sponsors/$code',
+                        body: {
+                          'name': nameCtrl.text.trim(),
+                          'imageUrl': imgCtrl.text.trim(),
+                          'themePrimary': primCtrl.text.trim(),
+                          'themeAccent': accCtrl.text.trim(),
+                          'locationLock': lockEnabled,
+                          if (lockEnabled && lat != null) 'lockLat': lat,
+                          if (lockEnabled && lng != null) 'lockLng': lng,
+                          if (lockEnabled && radius != null)
+                            'lockRadius': radius,
+                        },
+                      );
+                      var error = patchRes.error;
+                      if (error == null && pickedImage != null) {
+                        final uploadRes = await _uploadSponsorImage(
+                          code,
+                          pickedImage!,
+                        );
+                        error = uploadRes.error;
+                      }
+                      if (!context.mounted) return;
+                      setDialogState(() => uploadingImage = false);
+                      if (error != null) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('فشل الحفظ: $error')),
+                        );
+                        return;
+                      }
+                      if (mounted) navigator.pop();
+                      setState(() => _message = 'تم حفظ الراعي');
+                      _refresh();
+                    },
+              child: uploadingImage
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('حفظ'),
             ),
           ],
         ),
@@ -1214,15 +1421,35 @@ class _SponsorTabState extends State<SponsorTab> {
                     TextField(
                       controller: _imageUrlCtrl,
                       decoration: const InputDecoration(
-                        labelText: 'رابط صورة المربع',
-                        hintText: 'https://...',
+                        labelText: 'رابط صورة المربع أو ارفعي من الجهاز',
+                        hintText: 'https://... اختياري',
                       ),
                     ),
                   ],
                   actions: [
                     ElevatedButton(
-                      onPressed: _createSponsor,
+                      onPressed: _uploadingSponsorImage ? null : _createSponsor,
                       child: const Text('إنشاء راعي'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: _uploadingSponsorImage
+                          ? null
+                          : _pickNewSponsorImage,
+                      icon: const Icon(Icons.upload_file),
+                      label: const Text('اختيار صورة من الجهاز'),
+                    ),
+                    Text(
+                      _newSponsorImageFile?.name ??
+                          'المقاس الأفضل 1200×1200، JPG/PNG/WebP، أقل من 2MB',
+                      style: Theme.of(context).textTheme.bodySmall,
                     ),
                   ],
                 ),
@@ -2478,6 +2705,7 @@ class NotificationsTab extends StatefulWidget {
 class _NotificationsTabState extends State<NotificationsTab> {
   final _titleCtrl = TextEditingController();
   final _messageCtrl = TextEditingController();
+  final _awardMonthCtrl = TextEditingController();
   bool _sending = false;
   bool _monthlySending = false;
   bool _seasonNoticeSending = false;
@@ -2488,6 +2716,7 @@ class _NotificationsTabState extends State<NotificationsTab> {
   void dispose() {
     _titleCtrl.dispose();
     _messageCtrl.dispose();
+    _awardMonthCtrl.dispose();
     super.dispose();
   }
 
@@ -2496,6 +2725,9 @@ class _NotificationsTabState extends State<NotificationsTab> {
     String fallback = 'تم إرسال الإشعار',
   }) {
     if (data is! Map) return fallback;
+    if (data['push'] is Map) {
+      return _pushDeliveryMessage(data['push'], fallback: fallback);
+    }
     final id = (data['id'] ?? '').toString();
     final recipients = data['recipients'] ?? data['directRecipients'];
     final errors = data['errors'];
@@ -2594,23 +2826,67 @@ class _NotificationsTabState extends State<NotificationsTab> {
     }
   }
 
-  Future<void> _sendMonthlyLeaderboardAwards() async {
+  Future<void> _sendMonthlyLeaderboardAwards({bool dryRun = false}) async {
     setState(() => _monthlySending = true);
     try {
       final res = await widget.api.post(
         '/admin/notifications/monthly-leaderboards',
-        body: {'limit': 10},
+        body: {
+          'limit': 10,
+          'dryRun': dryRun,
+          if (_awardMonthCtrl.text.trim().isNotEmpty)
+            'seasonYm': int.tryParse(_awardMonthCtrl.text.trim()) ?? 0,
+        },
       );
       if (!mounted) return;
       if (res.error != null) throw res.error!;
       final data = res.data;
-      final sent = data is Map ? (data['pushesSent'] ?? 0) : 0;
-      final created = data is Map ? (data['eventsCreated'] ?? 0) : 0;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('تم تجهيز $created إنجاز وإرسال $sent إشعار شهري'),
-        ),
-      );
+      if (dryRun) {
+        final awards = data is Map && data['awards'] is List
+            ? data['awards'] as List
+            : [];
+        await showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('معاينة الفائزين المؤرشفين'),
+            content: SizedBox(
+              width: 580,
+              child: SingleChildScrollView(
+                child: Text(
+                  awards.isEmpty
+                      ? '${data is Map ? data['notice'] ?? 'لا توجد نتائج' : 'لا توجد نتائج'}'
+                      : awards
+                            .map(
+                              (a) =>
+                                  '${a['scope']} • ${a['gameId']} • المركز ${a['rank']}\n${a['leaderName']} — فوز ${a['wins']} | خسارة ${a['losses']}',
+                            )
+                            .join('\n\n'),
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('إغلاق'),
+              ),
+            ],
+          ),
+        );
+      } else {
+        final sent = data is Map ? (data['pushesSent'] ?? 0) : 0;
+        final created = data is Map ? (data['eventsCreated'] ?? 0) : 0;
+        final errors = data is Map && data['pushErrors'] is List
+            ? (data['pushErrors'] as List).length
+            : 0;
+        final notice = data is Map ? (data['notice'] ?? '') : '';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'تم تجهيز $created إنجاز وإرسال $sent إشعار؛ تعذر $errors. $notice',
+            ),
+          ),
+        );
+      }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -2653,7 +2929,7 @@ class _NotificationsTabState extends State<NotificationsTab> {
       builder: (dialogContext) => AlertDialog(
         title: const Text('تصفير السيزن الشهري؟'),
         content: const Text(
-          'بيرجع كل اللاعبين إلى ٥ لآلئ، ويترك الانواط محفوظة، ويرسل إشعار نهاية السيزن.',
+          'بيرجع كل اللاعبين إلى ٥ لآلئ، ويترك التصنيفات محفوظة، ويرسل إشعار نهاية السيزن.',
         ),
         actions: [
           TextButton(
@@ -2794,7 +3070,7 @@ class _NotificationsTabState extends State<NotificationsTab> {
         ),
         const SizedBox(height: 8),
         Text(
-          'يرجع كل اللاعبين إلى ٥ لآلئ، ويبدأ ترتيب الشهر من جديد، وتظل الانواط محفوظة.',
+          'يرجع كل اللاعبين إلى ٥ لآلئ، ويبدأ ترتيب الشهر من جديد، وتظل التصنيفات محفوظة.',
           style: _mutedTextStyle(context),
         ),
         const SizedBox(height: 16),
@@ -2861,16 +3137,33 @@ class _NotificationsTabState extends State<NotificationsTab> {
         ),
         const SizedBox(height: 8),
         Text(
-          'يرسل إشعارًا خارجيًا لأول 10 لاعبين في كل لعبة، ويضيف الإنجاز داخل مسيرتهم. يتم احتساب اللاعبين الذين لعبوا فعليًا فقط.',
+          'العام والسبونسر والدواوين: المركز والفوز والخسارة واللآلئ لكل فائز من النتائج المؤرشفة. الإرسال المتكرر يتجاوز الإشعارات المرسلة سابقًا.',
           style: _mutedTextStyle(context),
         ),
         const SizedBox(height: 16),
+        TextField(
+          controller: _awardMonthCtrl,
+          keyboardType: TextInputType.number,
+          maxLength: 6,
+          decoration: const InputDecoration(
+            labelText: 'الشهر YYYYMM — فارغ للشهر السابق',
+            hintText: '202609',
+          ),
+        ),
+        OutlinedButton.icon(
+          onPressed: _monthlySending
+              ? null
+              : () => _sendMonthlyLeaderboardAwards(dryRun: true),
+          icon: const Icon(Icons.preview),
+          label: const Text('معاينة بدون إرسال'),
+        ),
+        const SizedBox(height: 12),
         SizedBox(
           width: double.infinity,
           child: FilledButton.icon(
             onPressed: (_sending || _monthlySending)
                 ? null
-                : _sendMonthlyLeaderboardAwards,
+                : () => _sendMonthlyLeaderboardAwards(),
             icon: _monthlySending
                 ? const SizedBox(
                     width: 18,
